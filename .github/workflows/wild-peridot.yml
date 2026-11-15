@@ -25,6 +25,25 @@ jobs:
             libncurses5-dev libssl-dev libxml2-utils lz4 pahole \
             python3 python-is-python3 rsync unzip wget zip zstd cpio jq
 
+      - name: Setup & Restore CCache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-peridot-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-peridot-${{ github.ref_name }}-
+            ccache-peridot-
+
+      - name: Configure CCache
+        run: |
+          mkdir -p ~/.ccache
+          ccache -M 5G
+          ccache -o compression=true
+          ccache -o compression_level=6
+          ccache -o compiler_check=content
+          ccache -o sloppiness=file_macro,locale,time_macros,include_file_mtime,include_file_ctime
+          ccache -z
+
       - name: Checkout Forked Kernel Repository
         uses: actions/checkout@v4
         with:
@@ -78,7 +97,8 @@ jobs:
         run: |
           export PATH="${{ github.workspace }}/clang/bin:$PATH"
 
-          # Generate fragment for SUSFS & Droidspaces
+          mkdir -p out
+
           cat << 'EOF' > wild_peridot.config
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
@@ -114,8 +134,7 @@ jobs:
           # CONFIG_MODVERSIONS is not set
           EOF
 
-          # Merge Peridot device configs + our feature fragment
-          ARCH=arm64 LLVM=1 LLVM_IAS=1 scripts/kconfig/merge_config.sh -O out \
+          ARCH=arm64 LLVM=1 LLVM_IAS=1 scripts/kconfig/merge_config.sh -m -O out \
             arch/arm64/configs/gki_defconfig \
             arch/arm64/configs/vendor/pineapple_GKI.config \
             arch/arm64/configs/vendor/peridot_GKI.config \
@@ -123,22 +142,32 @@ jobs:
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: Compile Kernel
+      - name: Compile Kernel with CCache
         working-directory: ${{ github.workspace }}/kernel
         run: |
-          export PATH="${{ github.workspace }}/clang/bin:$PATH"
+          export PATH="/usr/lib/ccache:${{ github.workspace }}/clang/bin:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          export KBUILD_BUILD_TIMESTAMP="Sun Nov 15 00:00:00 UTC 2026"
+          export KBUILD_BUILD_USER="kzeedev"
+          export KBUILD_BUILD_HOST="actions"
+
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            HOSTCXX="ccache g++" \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             Image.gz Image
 
+          echo "=== CCache Statistics ==="
+          ccache -s
+
       - name: Package AnyKernel3 & boot.img
         working-directory: ${{ github.workspace }}
         run: |
-          # 1. Generate raw GKI boot.img
           python3 mkbootimg/mkbootimg.py \
             --header_version 4 \
             --kernel kernel/out/arch/arm64/boot/Image.gz \
@@ -147,7 +176,6 @@ jobs:
             --os_patch_level 2026-11 \
             -o boot.img
 
-          # 2. Package AnyKernel3 (Recommended for ADB Sideload in Infinity-X Recovery)
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
           cd AnyKernel3
           zip -r9 ../Peridot-WildPatched-AK3.zip * -x .git README.md *placeholder
