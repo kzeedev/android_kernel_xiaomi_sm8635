@@ -1,12 +1,12 @@
-name: WildKernels Pipeline for Peridot (Lineage-24.0)
+name: Build Peridot Kernel via WildKernels Patches
 
 on:
   workflow_dispatch:
     inputs:
-      bypass_module_check:
-        description: 'Apply WildKernels Module Load Bypass (Fixes Custom ROM Bootloop)'
-        type: boolean
-        default: true
+      ksu_variant:
+        description: 'KernelSU Variant (next or sukisu)'
+        required: false
+        default: 'next'
 
 jobs:
   build:
@@ -25,60 +25,54 @@ jobs:
             libncurses5-dev libssl-dev libxml2-utils lz4 pahole \
             python3 python-is-python3 rsync unzip wget zip zstd cpio jq
 
-      - name: Clone Peridot Kernel & WildKernels Ecosystem
+      - name: Clone Sources & WildKernels Patch Repos
         run: |
-          # 1. Peridot Lineage 24.0 Kernel Source
+          # 1. Peridot Lineage-24.0 Kernel Source
           git clone --depth=1 -b lineage-24.0 https://github.com/peridot-dev/android_kernel_xiaomi_sm8635.git kernel
 
-          # 2. WildKernels Patch Repository & AnyKernel3
+          # 2. WildKernels Official Patches & AnyKernel3
           git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wild_patches
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git AnyKernel3
 
-          # 3. SUSFS & Droidspaces Official Upstream Repos used by WildKernels
+          # 3. Official SUSFS for Android 14 6.1
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-          git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS.git droidspaces
 
-          # 4. AOSP Clang 18 + mkbootimg
+          # 4. AOSP Clang 18 & mkbootimg
           mkdir -p clang
           wget -qO- https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz | tar -xzf - -C clang
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg.git mkbootimg
 
-      - name: Auto-Apply WildKernels Stack (KSU-Next + SUSFS + Droidspaces + Bypass)
+      - name: Integrate KernelSU-Next & WildKernels Patches
         working-directory: ${{ github.workspace }}/kernel
         run: |
-          # 1. Pull WildKernels' pre-integrated KernelSU-Next (pershoot/dev-susfs branch)
+          # 1. Setup KernelSU-Next with pre-integrated SUSFS branch used by WildKernels
           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
 
-          # 2. Copy SUSFS kernel files & apply 6.1 patch
+          # 2. Copy SUSFS filesystem headers and sources
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+          # 3. Apply SUSFS base kernel patch
           patch -p1 --forward --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || true
 
-          # 3. Apply WildKernels Common & Hide Patches automatically
-          for p in ../wild_patches/common/*.patch ../wild_patches/maps/*.patch; do
-            if [ -f "$p" ]; then
-              echo "Applying WildKernels patch: $p"
-              patch -p1 --forward --fuzz=3 < "$p" || true
+          # 4. Apply WildKernels patches dynamically from WildKernels/kernel_patches
+          find ../wild_patches -name "*.patch" | sort | while read -r patch_file; do
+            echo "Checking patch: $patch_file"
+            if patch -p1 --dry-run --forward --fuzz=3 < "$patch_file" >/dev/null 2>&1; then
+              echo "Applying: $patch_file"
+              patch -p1 --forward --fuzz=3 < "$patch_file"
+            else
+              echo "Skipping incompatible/already applied patch: $patch_file"
             fi
           done
 
-          # 4. Apply WildKernels Force Module Load Bypass (Critical for Infinity-X vendor_dlkm)
-          if [ "${{ inputs.bypass_module_check }}" = "true" ]; then
-            # Bypass vermagic and CRC checks in kernel/module/main.c (WildKernels Bypass method)
-            sed -i 's/!check_modstruct_version(info, mod)/false/g' kernel/module/main.c || true
-            sed -i 's/!check_version(info, modname, mod, crc)/false/g' kernel/module/main.c || true
-            sed -i 's/check_modinfo(mod, info, 0)/0/g' kernel/module/main.c || true
-          fi
-
-      - name: Merge Configs via WildKernels & Droidspaces Fragments
+      - name: Configure Kernel (Peridot Base + SUSFS + Droidspaces)
         working-directory: ${{ github.workspace }}/kernel
         run: |
           export PATH="${{ github.workspace }}/clang/bin:$PATH"
 
-          # Collect Droidspaces config fragment if present in repo, otherwise generate from WildKernels preset
-          DS_FRAGMENT=$(find ../droidspaces ../wild_patches -name "*droidspaces*.config" -o -name "*container*.config" | head -n 1)
-          
-          cat << 'EOF' > wild_features.config
+          # Generate fragment for SUSFS & Droidspaces
+          cat << 'EOF' > wild_peridot.config
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -92,14 +86,14 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
           CONFIG_NAMESPACES=y
           CONFIG_UTS_NS=y
           CONFIG_IPC_NS=y
           CONFIG_USER_NS=y
           CONFIG_PID_NS=y
           CONFIG_NET_NS=y
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
           CONFIG_CGROUPS=y
           CONFIG_CGROUP_DEVICE=y
           CONFIG_CGROUP_FREEZER=y
@@ -110,16 +104,16 @@ jobs:
           CONFIG_BRIDGE=y
           CONFIG_DEVTMPFS=y
           CONFIG_DEVTMPFS_MOUNT=y
+          # Disable strict modversions so Infinity-X vendor_dlkm modules won't reject the new kernel
           # CONFIG_MODVERSIONS is not set
           EOF
 
-          # Merge Peridot hardware configs + WildKernels features
+          # Merge Peridot device configs + our feature fragment
           ARCH=arm64 LLVM=1 LLVM_IAS=1 scripts/kconfig/merge_config.sh -O out \
             arch/arm64/configs/gki_defconfig \
             arch/arm64/configs/vendor/pineapple_GKI.config \
             arch/arm64/configs/vendor/peridot_GKI.config \
-            wild_features.config \
-            $DS_FRAGMENT
+            wild_peridot.config
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
@@ -135,10 +129,10 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             Image.gz Image
 
-      - name: Package Outputs (boot.img + WildKernels AnyKernel3)
+      - name: Package AnyKernel3 & boot.img
         working-directory: ${{ github.workspace }}
         run: |
-          # 1. Create boot.img
+          # 1. Generate raw GKI boot.img
           python3 mkbootimg/mkbootimg.py \
             --header_version 4 \
             --kernel kernel/out/arch/arm64/boot/Image.gz \
@@ -147,16 +141,15 @@ jobs:
             --os_patch_level 2026-11 \
             -o boot.img
 
-          # 2. Package with WildKernels AnyKernel3
+          # 2. Package AnyKernel3 (Recommended for ADB Sideload in Infinity-X Recovery)
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
-          cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
           cd AnyKernel3
-          zip -r9 ../Wild-Peridot-Lineage24-AK3.zip * -x .git README.md *placeholder
+          zip -r9 ../Peridot-WildPatched-AK3.zip * -x .git README.md *placeholder
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Wild-Peridot-Kernel
+          name: Peridot-Kernel-Build
           path: |
+            Peridot-WildPatched-AK3.zip
             boot.img
-            Wild-Peridot-Lineage24-AK3.zip
