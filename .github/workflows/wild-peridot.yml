@@ -8,6 +8,9 @@ on:
         required: false
         default: 'next'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -52,14 +55,10 @@ jobs:
 
       - name: Clone WildKernels Ecosystem & Toolchains
         run: |
-          # 1. WildKernels Official Patches & AnyKernel3
           git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wild_patches
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git AnyKernel3
-
-          # 2. Official SUSFS for Android 14 6.1
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
 
-          # 3. AOSP Clang 18 & mkbootimg
           mkdir -p clang
           wget -qO- https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz | tar -xzf - -C clang
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg.git mkbootimg
@@ -67,17 +66,13 @@ jobs:
       - name: Integrate KernelSU-Next & WildKernels Patches
         working-directory: ${{ github.workspace }}/kernel
         run: |
-          # 1. Setup KernelSU-Next with pre-integrated SUSFS branch used by WildKernels
           curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
 
-          # 2. Copy SUSFS filesystem headers and sources
           cp -r ../susfs4ksu/kernel_patches/fs/* fs/
           cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
 
-          # 3. Apply SUSFS base kernel patch
           patch -p1 --forward --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || true
 
-          # 4. Apply WildKernels patches dynamically from WildKernels/kernel_patches
           find ../wild_patches -name "*.patch" | sort | while read -r patch_file; do
             echo "Checking patch: $patch_file"
             if patch -p1 --dry-run --forward --fuzz=3 < "$patch_file" >/dev/null 2>&1; then
@@ -88,7 +83,6 @@ jobs:
             fi
           done
 
-          # 5. Bypass strict module version check in kernel/module/main.c for Infinity-X vendor_dlkm compatibility
           sed -i 's/!check_modstruct_version(info, mod)/false/g' kernel/module/main.c || true
           sed -i 's/!check_version(info, modname, mod, crc)/false/g' kernel/module/main.c || true
 
@@ -167,6 +161,7 @@ jobs:
 
       - name: Package AnyKernel3 & boot.img
         working-directory: ${{ github.workspace }}
+        id: meta
         run: |
           python3 mkbootimg/mkbootimg.py \
             --header_version 4 \
@@ -179,11 +174,33 @@ jobs:
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
           cd AnyKernel3
           zip -r9 ../Peridot-WildPatched-AK3.zip * -x .git README.md *placeholder
+          cd ..
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+          BUILD_DATE=$(date +'%Y%m%d')
+          KERNEL_VER=$(make -s -C kernel O=out kernelversion)
+          sha256sum Peridot-WildPatched-AK3.zip boot.img > sha256sums.txt
+
+          echo "tag=v${BUILD_DATE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+          echo "kver=${KERNEL_VER}" >> $GITHUB_OUTPUT
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: Peridot-Kernel-Build
-          path: |
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Peridot Kernel (${{ steps.meta.outputs.kver }}) - ${{ steps.meta.outputs.date }}"
+          body: |
+            ### Build Information
+            * **Device:** Poco F6 / Redmi Turbo 3 (`peridot` - SM8635)
+            * **Branch:** `lineage-24.0`
+            * **Kernel Version:** `${{ steps.meta.outputs.kver }}`
+            * **Features:** KernelSU-Next (`dev-susfs`) + SUSFS + Droidspaces + Module Check Bypass
+
+            ### Checksums (SHA256)
+            Check `sha256sums.txt` in assets.
+          files: |
             Peridot-WildPatched-AK3.zip
             boot.img
+            sha256sums.txt
+          draft: false
+          prerelease: false
