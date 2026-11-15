@@ -25,19 +25,22 @@ jobs:
             libncurses5-dev libssl-dev libxml2-utils lz4 pahole \
             python3 python-is-python3 rsync unzip wget zip zstd cpio jq
 
-      - name: Clone Sources & WildKernels Patch Repos
-        run: |
-          # 1. Peridot Lineage-24.0 Kernel Source
-          git clone --depth=1 -b lineage-24.0 https://github.com/peridot-dev/android_kernel_xiaomi_sm8635.git kernel
+      - name: Checkout Forked Kernel Repository
+        uses: actions/checkout@v4
+        with:
+          path: kernel
+          fetch-depth: 1
 
-          # 2. WildKernels Official Patches & AnyKernel3
+      - name: Clone WildKernels Ecosystem & Toolchains
+        run: |
+          # 1. WildKernels Official Patches & AnyKernel3
           git clone --depth=1 https://github.com/WildKernels/kernel_patches.git wild_patches
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git AnyKernel3
 
-          # 3. Official SUSFS for Android 14 6.1
+          # 2. Official SUSFS for Android 14 6.1
           git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
 
-          # 4. AOSP Clang 18 & mkbootimg
+          # 3. AOSP Clang 18 & mkbootimg
           mkdir -p clang
           wget -qO- https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz | tar -xzf - -C clang
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg.git mkbootimg
@@ -65,6 +68,10 @@ jobs:
               echo "Skipping incompatible/already applied patch: $patch_file"
             fi
           done
+
+          # 5. Bypass strict module version check in kernel/module/main.c for Infinity-X vendor_dlkm compatibility
+          sed -i 's/!check_modstruct_version(info, mod)/false/g' kernel/module/main.c || true
+          sed -i 's/!check_version(info, modname, mod, crc)/false/g' kernel/module/main.c || true
 
       - name: Configure Kernel (Peridot Base + SUSFS + Droidspaces)
         working-directory: ${{ github.workspace }}/kernel
@@ -104,7 +111,6 @@ jobs:
           CONFIG_BRIDGE=y
           CONFIG_DEVTMPFS=y
           CONFIG_DEVTMPFS_MOUNT=y
-          # Disable strict modversions so Infinity-X vendor_dlkm modules won't reject the new kernel
           # CONFIG_MODVERSIONS is not set
           EOF
 
